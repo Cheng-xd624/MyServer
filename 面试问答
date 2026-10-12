@@ -1,0 +1,65 @@
+## 1、Muduo 为什么用 LT（水平触发）而不是 ET（边缘触发）
+
+**口述答案：**
+muduo 选择 LT，核心是**降低编程复杂度，减少丢事件、死锁风险，LT 在非阻塞 fd 下性能差距不大**。
+
+1. ET 要求：**一旦收到可读事件，必须一次性循环读完内核缓冲区全部数据**，否则不会再次通知。一旦少读一点，事件永久丢失，连接卡死，代码容错难度很高。
+2. LT：只要内核缓冲区还有未读完数据，epoll_wait 就会持续返回可读事件。就算一次没读完，下一轮 loop 还会继续触发，容错强。
+3. muduo 全部 fd 设置为**非阻塞**，LT 不会出现阻塞读卡死；实测 LT 和 ET 性能差距不大，陈硕认为 ET 带来的性能收益不足以抵消极高的编码风险。
+4. 工程角度：LT 代码更健壮，业务开发不容易写出 bug，更适合业务服务器。
+
+
+
+## 2、TcpConnection 的生命周期如何管理？shared_ptr 和 weak_ptr 的作用
+
+**口述答案：**
+TcpConnection 生命周期**不确定**：连接随时可能在事件回调中关闭，如果裸指针，回调执行时对象可能已经被析构，造成野指针崩溃。
+
+1. **shared_ptr**：TcpConnection 用`shared_ptr<TcpConnection>`管理。TcpServer 内部有一个`std::map`保存所有连接的 shared_ptr，引用计数 + 1；只要还有 shared_ptr 持有，对象就不会释放。连接关闭时从 map erase，引用计数减一。
+2. **weak_ptr tie_（Channel 里的 tie）**：Channel 封装 fd 和事件回调，Channel 保存`weak_ptr`指向 TcpConnection，**不增加引用计数**。
+   - epoll 触发事件，执行`handleEvent`前，调用`tie_.lock()`尝试提升为 shared_ptr；
+   - 如果 lock 成功 → 引用计数 + 1，**保证本次事件回调执行期间，TcpConnection 对象不会被销毁**；
+   - 如果 lock 失败，说明 TcpConnection 已经析构，直接跳过回调，防止访问野指针。
+
+> 一句话总结：`tie`机制解决**正在执行 IO 回调的时候，连接被关闭析构**的经典竞态问题。
+
+
+
+
+## 3、如果客户端发送大量数据，Buffer 如何扩容？
+
+**口述答案：**
+muduo Buffer 底层是`std::vector<char>`，自带读写索引：`readerIndex_`、`writerIndex_`，还有前置预留空间`kCheapPrepend = 8`。`ensureWritableBytes(len)`负责扩容逻辑。
+
+1. 当收到数据，判断**可写字节**是否足够写入本次数据。
+2. 如果**缓冲区尾部空闲空间不够，但前面已经读完的空闲空间足够**：把已读数据向前挪（`readerIndex_`到`writerIndex_`的数据拷贝到缓冲区起始位置），回收前面空闲空间，不重新分配内存。
+3. 如果前后空闲加起来都不够：vector 调用 resize 扩容，扩容大小至少需要`writerIndex_ + len`；vector 一般 2 倍扩容。
+4. 数据 append 到`writerIndex_`位置，写完 writerIndex 向后移动。
+5. 消费数据调用 retrieve，移动 readerIndex，**不会释放内存**，只移动索引；内存只增不减，适合长连接流量波动场景。
+
+> 
+> 加分：Buffer**不是线程安全**，读写都在所属 IO 线程，不需要加锁。
+
+
+
+
+## 4、多线程下 EventLoop 如何保证线程安全？（one loop per thread）
+
+**口述答案：**
+muduo 核心模型 `one loop per thread`：**一个 EventLoop 绑定唯一线程，所有 fd 的 IO 事件，只能在这个 EventLoop 所属线程处理**。
+
+1. **核心原则：IO 操作不跨线程**。`assertInLoopThread()`断言，强制检查当前执行线程是不是 EventLoop 所属线程；非 IO 线程不能直接调用 loop 里的 IO 相关函数，违反直接 assert 崩溃。
+2. **跨线程任务提交：runInLoop /queueInLoop**
+   - 如果调用`runInLoop`的线程就是 loop 所属 IO 线程：直接执行回调；
+   - 如果是别的线程：把回调 functor 加入`pendingFunctors_`任务队列（队列访问加 mutex 锁），然后调用`wakeup()`，向 eventfd 写一个字节，唤醒阻塞在 epoll_wait 的 IO 线程。
+3. IO 线程被唤醒，退出 poll，在 loop 循环的`doPendingFunctors()`执行队列任务。
+   - 优化：pendingFunctors_会 swap 到局部 vector，缩短锁持有时间，避免长时间阻塞其他线程提交任务。
+4. 所以：**EventLoop 的 IO 事件处理是单线程无锁；跨线程投递任务，用任务队列 + eventfd 唤醒，临界区只有任务入队的短锁**。
+
+> 
+> 一句话总结：IO 逻辑全部锁在同一个线程，避免多线程竞态；跨线程通信不直接操作 IO，而是投递任务唤醒 loop 执行。
+
+
+## 5、为什么用 try-catch 包住 JSON 解析？
+网络数据不可信，客户端可能发来非法 JSON 或缺少字段。异常必须被捕获，否则会导致服务器进程退出。
+
