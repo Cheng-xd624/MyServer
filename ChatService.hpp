@@ -49,6 +49,15 @@ public:
     // 客户端断开连接时调用：从在线表移除
     void clientCloseException(const muduo::net::TcpConnectionPtr& conn);
 
+    // 添加好友，给目标用户发通知
+    std::string addFriend(int requesterId, int accepterId);
+
+    // 同意好友请求(对方不在线时不能添加好友)
+    std::string acceptFriend(int requesterId, int accepterId);
+
+    // 查询某个用户的所有好友列表
+    std::vector<User> queryFriend(int userId);
+
 private:
     // 构造函数私有，单例
     ChatService() = default;

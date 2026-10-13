@@ -123,12 +123,31 @@ void ChatServer::onMessage(
             if (!ok)
             {
                 // 对方不在线，回给发送方一个错误
-                json resp;
-                resp["msgid"]  = ONE_CHAT_MSG;
-                resp["errno"]  = USER_OFFLINE;
-                resp["errmsg"] = "对方不在线";
-                conn->send(resp.dump());
+                json response;
+                response["msgid"]  = ONE_CHAT_MSG;
+                response["errno"]  = USER_OFFLINE;
+                response["errmsg"] = "对方不在线";
+                // 这个case里的response是json的，所以要用dump()转成字符串才能发送
+                conn->send(response.dump());
             }
+            break;
+        }
+        // ---------------- 添加好友 ----------------
+        case ADD_FRIEND_MSG:
+        {
+            int userId   = js["id"].get<int>();
+            int friendId = js["friendid"].get<int>();
+            std::string response = ChatService::instance()->addFriend(userId, friendId);
+            conn->send(response);
+            break;
+        }
+        // ---------------- 同意好友请求 ----------------
+        case ACCEPT_FRIEND_MSG:
+        {
+            int userId = js["id"].get<int>();
+            int friendId = js["friendid"].get<int>();
+            std::string response = ChatService::instance()->acceptFriend(userId, friendId);
+            conn->send(response);
             break;
         }
         case GROUP_CHAT_MSG:

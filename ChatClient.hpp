@@ -5,6 +5,7 @@
 #include <muduo/net/InetAddress.h>
 #include <atomic>
 #include <string>
+#include <vector>
 
 #include "protocol.hpp"
 

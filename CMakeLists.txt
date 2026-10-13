@@ -21,6 +21,7 @@ add_executable(ChatServer
     ChatService.cpp
     UserModel.cpp
     ConnectionPool.cpp
+    FriendModel.cpp
     )
 
 # 链接 Muduo 网络库、基础库和 pthread

@@ -15,11 +15,13 @@ enum EnMsgType
     REG_MSG         = 3,    //注册请求
     REG_MSG_ACK     = 4,    //注册响应
     ONE_CHAT_MSG    = 5,    //一对一聊天
-    ADD_FRIEND_MSG  = 6,    //添加好友
-    CREATE_GROUP_MSG= 7,    //创建群组
-    ADD_GROUP_MSG   = 8,    //加入群组
-    GROUP_CHAT_MSG  = 9,    //群聊
-    LOGINOUT_MSG    = 10,   //注销登录
+    ADD_FRIEND_MSG  = 6,    //添加好友请求，不用增加添加好友响应，客户端直接显示添加好友成功或失败
+    ACCEPT_FRIEND_MSG = 7,  //收到好友请求
+    CREATE_GROUP_MSG= 8,    //创建群组
+    ADD_GROUP_MSG   = 9,    //加入群组
+    GROUP_CHAT_MSG  = 10,   //群聊
+    LOGINOUT_MSG    = 11,   //注销登录
+    FRIEND_REQUEST_NOTICE = 12, //推送：好友申请/同意通知，用type区分
 };
 
 // 错误码

@@ -1,5 +1,6 @@
 #include "ChatClient.hpp"
 #include "protocol.hpp"
+#include "user.hpp"
 
 #include <muduo/base/Logging.h>
 #include <iostream>
@@ -7,8 +8,141 @@
 #include <chrono>
 #include <sstream>
 
+#include <termios.h>
+#include <unistd.h>
+
 using namespace muduo;
 using namespace muduo::net;
+
+// ============================================================
+// 终端原始模式 RAII：进入时关闭行缓冲+回显，离开时自动恢复
+// ============================================================
+class TerminalRaw
+{
+    termios _old;
+
+public:
+    TerminalRaw()
+    {
+        tcgetattr(STDIN_FILENO, &_old);
+        termios t = _old;
+        t.c_lflag &= ~(ICANON | ECHO); // 关闭规范模式和回显，逐字节读取
+        tcsetattr(STDIN_FILENO, TCSANOW, &t);
+    }
+    ~TerminalRaw()
+    {
+        tcsetattr(STDIN_FILENO, TCSANOW, &_old);
+    }
+};
+
+enum FilterMode
+{
+    FILTER_USERNAME,
+    FILTER_PASSWORD
+};
+
+// 校验一个输入字节；合法则把整段字符(含多字节UTF-8)填进 out，width=终端显示宽度
+// 返回 1=合法，0=非法（调用方响铃拒绝）
+static int checkChar(char firstByte, FilterMode mode, std::string &out, int &width)
+{
+    unsigned char c = static_cast<unsigned char>(firstByte);
+    out.clear();
+
+    if (mode == FILTER_USERNAME)
+    {
+        // 字母、数字
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+        {
+            out.push_back(firstByte);
+            width = 1;
+            return 1;
+        }
+        // 中文 UTF-8 三字节序列 (0xE0~0xEF 开头)
+        if (c >= 0xE0 && c <= 0xEF)
+        {
+            out.push_back(firstByte);
+            char b2, b3;
+            if (read(STDIN_FILENO, &b2, 1) == 1 && read(STDIN_FILENO, &b3, 1) == 1)
+            {
+                out.push_back(b2);
+                out.push_back(b3);
+                width = 2; // 中文占终端 2 列
+                return 1;
+            }
+            return 0;
+        }
+    }
+    else // FILTER_PASSWORD：可打印 ASCII 0x21~0x7E，不含空格
+    {
+        if (c >= 0x21 && c <= 0x7E)
+        {
+            out.push_back(firstByte);
+            width = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// 逐字符读取一行：非法字符响铃拒绝、不进字符串；退格时整行重绘，避免宽字符擦除残留
+static std::string readFiltered(const std::string &prompt, FilterMode mode)
+{
+    std::cout << prompt;
+    std::cout.flush();
+
+    TerminalRaw raw;
+    std::string result;
+
+    // 删掉 result 末尾的一个 UTF-8 字符（兼容中文3字节、ASCII 1字节）
+    auto eraseLastUtf8 = [](std::string &s)
+    {
+        if (s.empty())
+            return;
+        size_t pos = s.size();
+        // 回退跳过所有 UTF-8 后续字节(10xxxxxx)
+        while (pos > 0 && (static_cast<unsigned char>(s[pos - 1]) & 0xC0) == 0x80)
+            --pos;
+        if (pos > 0)
+            --pos; // 再跳一个首字节
+        s.erase(pos);
+    };
+
+    char c;
+    while (read(STDIN_FILENO, &c, 1) == 1)
+    {
+        if (c == '\n' || c == '\r') // 回车结束
+        {
+            std::cout << std::endl;
+            break;
+        }
+        if (c == '\b' || c == 0x7f) // 退格
+        {
+            if (!result.empty())
+            {
+                eraseLastUtf8(result);
+                // 整行重绘：\r 回行首 -> \x1b[K 清到行尾 -> 重新打印 prompt + result
+                std::cout << "\r\x1b[K" << prompt << result;
+                std::cout.flush();
+            }
+            continue;
+        }
+
+        std::string chBytes;
+        int width = 0;
+        if (checkChar(c, mode, chBytes, width) == 1)
+        {
+            result += chBytes;
+            std::cout << chBytes;
+            std::cout.flush();
+        }
+        else
+        {
+            std::cout << '\a'; // 响铃提示非法字符
+            std::cout.flush();
+        }
+    }
+    return result;
+}
 
 ChatClient::ChatClient(EventLoop *loop, const InetAddress &serverAddr)
     : _client(loop, serverAddr, "ChatClient"),
@@ -89,12 +223,36 @@ void ChatClient::onMessage(const TcpConnectionPtr &conn,
         {
             if (js["errno"].get<int>() == SUCCESS)
             {
+                // _friends 用于存储当前用户的好友列表，方便在客户端显示和操作
+                std::vector<User> _friends;
+                _friends.clear();
+                if(js.contains("friends"))
+                {
+                    for (const auto& friendJson : js["friends"])
+                    {
+                        User friendInfo;
+                        friendInfo.id = friendJson["id"].get<int>();
+                        friendInfo.name = friendJson["name"].get<std::string>();
+                        friendInfo.state = friendJson["state"].get<std::string>();
+                        _friends.push_back(friendInfo);
+                    }
+                }
+                std::cout << "\n[系统] 好友列表:\n";
+                for (const auto& friendInfo : _friends)
+                {
+                    std::cout << "  id: " << friendInfo.id
+                              << ", name: " << friendInfo.name
+                              << ", state: " << friendInfo.state << std::endl;
+                }
+
                 _loggedIn = true;
                 _userId = js["id"].get<int>();
                 _username = js["name"].get<std::string>();
                 std::cout << "\n[系统] 登录成功，欢迎 "
                           << _username << " (id=" << _userId << ")\n"
-                          << "输入 'chat <to> <msg>' 发送消息\n"
+                          << "输入 'chat <id> <msg>' 发送消息\n"
+                          << "输入 'addfriend <id>' 添加好友\n"
+                          << "输入 'acceptfriend <id>' 同意好友申请\n"
                           << "输入 'logout' 注销\n"
                           << std::endl;
             }
@@ -134,6 +292,39 @@ void ChatClient::onMessage(const TcpConnectionPtr &conn,
                 // 正常转发的消息
                 std::cout << "\n[新消息] 来自 " << js["from"].get<int>()
                           << ": " << js["message"].get<std::string>() << std::endl;
+            }
+            break;
+        }
+
+        case ADD_FRIEND_MSG:
+        {
+            if (js["errno"].get<int>() == SUCCESS)
+            {
+                std::cout << "\n[系统] " << js["errmsg"].get<std::string>() << std::endl;
+            }
+            else
+            {
+                std::cout << "\n[系统] 添加好友失败: "
+                          << js["errmsg"].get<std::string>() << std::endl;
+            }
+            break;
+        }
+
+        case FRIEND_REQUEST_NOTICE:
+        {
+            std::string type = js["type"].get<std::string>();
+            if (type == "accept")
+            {
+                std::cout << "\n[系统] 用户 " << js["fromname"].get<std::string>()
+                          << " (id=" << js["fromid"].get<int>()
+                          << ") 同意了你的好友申请" << std::endl;
+            }
+            else
+            {
+                std::cout << "\n[系统] 用户 " << js["fromname"].get<std::string>()
+                          << " (id=" << js["fromid"].get<int>()
+                          << ") 请求添加你为好友，输入 'acceptfriend "
+                          << js["fromid"].get<int>() << "' 同意" << std::endl;
             }
             break;
         }
@@ -193,26 +384,27 @@ void ChatClient::handleInput()
             if (choice == 1)
             {
                 int id;
-                std::string pwd;
                 std::cout << "请输入 id: ";
                 std::cin >> id;
                 std::cin.ignore(1024, '\n');
-                std::cout << "请输入密码: ";
-                std::getline(std::cin, pwd);
+                std::string pwd = readFiltered("请输入密码（字母/数字/符号）: ", FILTER_PASSWORD);
 
                 json js;
                 js["msgid"] = LOGIN_MSG;
                 js["id"] = id;
                 js["password"] = pwd;
                 sendJson(js);
+
+                // 等待服务器响应，登录成功后 _loggedIn 会被置为 true，进入下一轮循环显示已登录菜单
+                while (!_loggedIn)
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
             }
             else if (choice == 2)
             {
-                std::string name, pwd;
-                std::cout << "请输入用户名: ";
-                std::getline(std::cin, name);
-                std::cout << "请输入密码: ";
-                std::getline(std::cin, pwd);
+                std::string name = readFiltered("请输入用户名（中文/字母/数字）: ", FILTER_USERNAME);
+                std::string pwd = readFiltered("请输入密码（字母/数字/符号）: ", FILTER_PASSWORD);
 
                 json js;
                 js["msgid"] = REG_MSG;
@@ -220,6 +412,7 @@ void ChatClient::handleInput()
                 js["password"] = pwd;
                 sendJson(js);
             }
+
             else if (choice == 3)
             {
                 std::cout << "再见" << std::endl;
@@ -278,8 +471,36 @@ void ChatClient::handleInput()
                 sendJson(js);
                 continue;
             }
+            if(line.rfind("addfriend ", 0) == 0)
+            {
+                std::istringstream iss(line);
+                std::string cmd;
+                int friendId;
+                iss >> cmd >> friendId;
 
-            std::cout << "未知命令，可用命令: chat <to> <msg> / logout" << std::endl;
+                json js;
+                js["msgid"] = ADD_FRIEND_MSG;
+                js["id"] = _userId;
+                js["friendid"] = friendId;
+                sendJson(js);
+                continue;
+            }
+            if(line.rfind("acceptfriend ", 0) == 0)
+            {
+                std::istringstream iss(line);
+                std::string cmd;
+                int requesterId;
+                iss >> cmd >> requesterId;
+
+                json js;
+                js["msgid"] = ACCEPT_FRIEND_MSG; 
+                js["id"] = _userId;
+                js["requesterid"] = requesterId;
+                sendJson(js);
+                continue;
+            }
+
+            std::cout << "未知命令，可用命令: chat <to> <msg> / addfriend <id> / acceptfriend <id> / logout" << std::endl;
         }
     }
 }
