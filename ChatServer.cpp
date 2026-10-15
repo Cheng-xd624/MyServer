@@ -145,7 +145,7 @@ void ChatServer::onMessage(
         case ACCEPT_FRIEND_MSG:
         {
             int userId = js["id"].get<int>();
-            int friendId = js["friendid"].get<int>();
+            int friendId = js["requesterid"].get<int>();
             std::string response = ChatService::instance()->acceptFriend(userId, friendId);
             conn->send(response);
             break;

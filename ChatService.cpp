@@ -220,13 +220,14 @@ std::string ChatService::addFriend(int requesterId, int accepterId)
     {
         json notifyMsg;
         notifyMsg["msgid"] = FRIEND_REQUEST_NOTICE;
-        notifyMsg["userId"] = requesterId;
-        notifyMsg["friendId"] = accepterId;
+        notifyMsg["fromid"] = requesterId;
+        User fromUser = UserModel::instance()->query(requesterId);
+        notifyMsg["fromname"] = fromUser.name;
         notifyMsg["type"] = "request";
         targetConn->send(notifyMsg.dump());
 
         response["errno"] = SUCCESS;
-        response["msg"] = "好友请求已发送，等待对方同意";
+        response["errmsg"] = "好友请求已发送，等待对方同意";
     }
     else
     {
@@ -238,54 +239,56 @@ std::string ChatService::addFriend(int requesterId, int accepterId)
 }
 
 // 同意好友请求:并通知申请人
-std::string ChatService::acceptFriend(int requesterId, int accepterId)
+// accepterId: 当前操作同意的用户（自己）, requesterId: 发起好友申请的用户
+std::string ChatService::acceptFriend(int accepterId, int requesterId)
 {
     json response;
-    response["msgid"] = ACCEPT_FRIEND_MSG;
+    response["msgid"] = ADD_FRIEND_MSG;
 
-    if (requesterId == accepterId)
+    if (accepterId == requesterId)
     {
         response["errno"] = -1;
         response["errmsg"] = "不能添加自己为好友";
         return response.dump();
     }
 
-    User targetUser = UserModel::instance()->query(accepterId);
+    User targetUser = UserModel::instance()->query(requesterId);
     if (targetUser.id == -1)
     {
         response["errno"] = USER_NOT_EXIST;
         response["errmsg"] = "用户不存在";
         return response.dump();
     }
-    if (!FriendModel::instance()->insert(requesterId, accepterId))
+    if (!FriendModel::instance()->insert(accepterId, requesterId))
     {
-        response["msgid"] = -1;
+        response["errno"] = -1;
         response["errmsg"] = "添加好友失败";
         return response.dump();
     }
 
-    // 通知申请人
-    TcpConnectionPtr targetConn;
+    // 通知申请人：对方同意了
+    TcpConnectionPtr requesterConn;
     {
         std::lock_guard<std::mutex> lock(_connMutex);
         auto it = _onlineUserMap.find(requesterId);
         if (it != _onlineUserMap.end())
         {
-            targetConn = it->second;
+            requesterConn = it->second;
         }
     }
-    if (targetConn)
+    if (requesterConn)
     {
+        User accepter = UserModel::instance()->query(accepterId);
         json notifyMsg;
         notifyMsg["msgid"] = FRIEND_REQUEST_NOTICE;
-        notifyMsg["userId"] = requesterId;
-        notifyMsg["friendId"] = accepterId;
+        notifyMsg["fromid"] = accepterId;
+        notifyMsg["fromname"] = accepter.name;
         notifyMsg["type"] = "accept";
-        targetConn->send(notifyMsg.dump());
+        requesterConn->send(notifyMsg.dump());
     }
 
-    response["msgid"] = ACCEPT_FRIEND_MSG;
     response["errno"] = SUCCESS;
+    response["errmsg"] = "已同意好友申请";
     return response.dump();
 }
 

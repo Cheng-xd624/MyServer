@@ -53,7 +53,7 @@ public:
     std::string addFriend(int requesterId, int accepterId);
 
     // 同意好友请求(对方不在线时不能添加好友)
-    std::string acceptFriend(int requesterId, int accepterId);
+    std::string acceptFriend(int accepterId, int requesterId);
 
     // 查询某个用户的所有好友列表
     std::vector<User> queryFriend(int userId);
