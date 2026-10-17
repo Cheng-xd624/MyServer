@@ -141,12 +141,21 @@ void ChatServer::onMessage(
             conn->send(response);
             break;
         }
-        // ---------------- 同意好友请求 ----------------
+        // ---------------- 回应添加好友请求 ----------------
         case ACCEPT_FRIEND_MSG:
         {
             int userId = js["id"].get<int>();
             int friendId = js["requesterid"].get<int>();
-            std::string response = ChatService::instance()->acceptFriend(userId, friendId);
+            std::string type = js["type"].get<std::string>();
+            std::string response;
+            if(type=="accept")
+            {
+                response = ChatService::instance()->acceptFriend(userId, friendId);
+            }
+            else if(type=="reject")
+            {
+                response = ChatService::instance()->rejectFriend(userId, friendId);
+            }
             conn->send(response);
             break;
         }

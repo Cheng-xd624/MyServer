@@ -3,6 +3,7 @@
 #include<muduo/net/InetAddress.h>
 #include<muduo/base/Logging.h>
 #include"ChatServer.hpp"
+#include"UserModel.hpp"
 #include<string>
 
 using namespace muduo;
@@ -19,6 +20,9 @@ int main()
     InetAddress addr(6000);
 
     ChatServer server(&loop,addr,"ChatServer");
+
+    // 重置用户状态，防止服务器异常退出后，用户状态一直是online
+    UserModel::instance()->resetState();
 
     //5、启动服务器（开始监听）
     server.start();

@@ -90,3 +90,21 @@ explicit可以阻止隐式转换
 千万不要持锁做 IO！数据库查询、mysql_query 是 IO 操作，很慢！
 ✅ 工程原则：
  **锁只保护共享内存数据（`_onlineUserMap`）；数据库 IO、业务计算全部放锁外面执行。**
+
+## emplace_back和push_back
+push_back：先构造临时User，再移动到vector
+vec.push_back(User(1001, "zhangsan"));
+emplace_back：直接在vector内存上构造，没有临时对象
+vec.emplace_back(1002, "lisi");
+
+# `raii.valid()` 是**检查有没有拿到有效的数据库连接**；
+- `raii.get()` 返回的 `MYSQL* conn`，**如果拿不到连接，get 返回 nullptr**。
+- `raii.valid()` 本质内部就是判断：**保存的 MYSQL 指针是否不为空**。
+# `mysql_query(conn, sql)` 返回值是**检查这条 SQL 语句执行有没有出错**。
+`mysql_query` 检查的是：
+连接是正常连上数据库的，但是这条 SQL 执行报错，例如：
+1. 表名写错（offline_messages 不存在）
+2. 字段名错误
+3. 数据库权限不足
+4. SQL 语法错误
+5. 数据库崩溃，连接中途断开

@@ -52,8 +52,11 @@ public:
     // 添加好友，给目标用户发通知
     std::string addFriend(int requesterId, int accepterId);
 
-    // 同意好友请求(对方不在线时不能添加好友)
+    // 同意好友请求
     std::string acceptFriend(int accepterId, int requesterId);
+
+    // 拒绝好友请求
+    std::string rejectFriend(int accepterId, int requesterId);
 
     // 查询某个用户的所有好友列表
     std::vector<User> queryFriend(int userId);

@@ -223,10 +223,44 @@ void ChatClient::onMessage(const TcpConnectionPtr &conn,
         {
             if (js["errno"].get<int>() == SUCCESS)
             {
+                // contains()检查json对象中是否包含指定的键，返回true/false
+                if(js.contains("offlinemsgs") && !js["offlinemsgs"].empty())
+                {
+                    std::cout<<"[系统] 收到离线消息:\n";
+                    // 离线消息由服务器存放再"offlinemsgs"数组里，每个元素都是一个json对象
+                    // offlinemsgs 数组里混着两种消息：
+                    //   1. 单聊消息   {"msgid":5,"from":x,"to":当前id,"message":"..."}
+                    //   2. 好友通知   {"msgid":12,"fromid":x,"fromname":"...","type":"request"/"accept"/"reject"}
+                    // 必须按 msgid 分流，不能一刀切取 ["from"]/["message"]，否则取好友通知时会拿到 null 崩溃。
+                    for(auto& msg : js["offlinemsgs"])
+                    {
+                        int subId = msg["msgid"].get<int>();
+                        if (subId == ONE_CHAT_MSG) // 单聊消息
+                        {
+                            int form = msg["from"].get<int>();
+                            std::string message = msg["message"].get<std::string>();
+                            std::cout<<" 【单聊】 来自 "<<form<<" 的离线消息: "<<message<<std::endl;
+                        }
+                        else if (subId == FRIEND_REQUEST_NOTICE) // 好友通知
+                        {
+                            int fromId = msg["fromid"].get<int>();
+                            std::string fromName = msg["fromname"].get<std::string>();
+                            std::string type = msg["type"].get<std::string>();
+                            if(type=="accept")
+                                std::cout<<" 【好友】 "<<fromName<<" ("<<fromId<<") 已同意你的好友申请"<<std::endl;
+                            else
+                                std::cout<<" 【好友】 "<<fromName<<" ("<<fromId<<") 请求添加你为好友"<<std::endl;
+                        }
+                        else
+                        {
+                            std::cout<<" 【未知】 收到未知类型离线消息: "<<msg.dump()<<std::endl;
+                        }
+                    }
+                }
                 // _friends 用于存储当前用户的好友列表，方便在客户端显示和操作
                 std::vector<User> _friends;
                 _friends.clear();
-                if(js.contains("friends"))
+                if(js.contains("friends") && !js["friends"].empty())
                 {
                     for (const auto& friendJson : js["friends"])
                     {
@@ -237,6 +271,7 @@ void ChatClient::onMessage(const TcpConnectionPtr &conn,
                         _friends.push_back(friendInfo);
                     }
                 }
+                
                 std::cout << "\n[系统] 好友列表:\n";
                 for (const auto& friendInfo : _friends)
                 {
@@ -253,6 +288,7 @@ void ChatClient::onMessage(const TcpConnectionPtr &conn,
                           << "输入 'chat <id> <msg>' 发送消息\n"
                           << "输入 'addfriend <id>' 添加好友\n"
                           << "输入 'acceptfriend <id>' 同意好友申请\n"
+                          << "输入 'rejectfriend <id>' 拒绝好友申请\n"
                           << "输入 'logout' 注销\n"
                           << std::endl;
             }
@@ -310,6 +346,20 @@ void ChatClient::onMessage(const TcpConnectionPtr &conn,
             break;
         }
 
+        case ACCEPT_FRIEND_MSG:
+        {
+            if (js["errno"].get<int>() == SUCCESS)
+            {
+                std::cout << "\n[系统] " << js["errmsg"].get<std::string>() << std::endl;
+            }
+            else
+            {
+                std::cout << "\n[系统] 同意好友请求失败: "
+                          << js["errmsg"].get<std::string>() << std::endl;
+            }
+            break;
+        }
+
         case FRIEND_REQUEST_NOTICE:
         {
             std::string type = js["type"].get<std::string>();
@@ -319,12 +369,22 @@ void ChatClient::onMessage(const TcpConnectionPtr &conn,
                           << " (id=" << js["fromid"].get<int>()
                           << ") 同意了你的好友申请" << std::endl;
             }
-            else
+            else if (type == "reject")
+            {
+                std::cout << "\n[系统] 用户 " << js["fromname"].get<std::string>()
+                          << " (id=" << js["fromid"].get<int>()
+                          << ") 拒绝了你的好友申请" << std::endl;
+            }
+            else if (type == "request")
             {
                 std::cout << "\n[系统] 用户 " << js["fromname"].get<std::string>()
                           << " (id=" << js["fromid"].get<int>()
                           << ") 请求添加你为好友，输入 'acceptfriend "
                           << js["fromid"].get<int>() << "' 同意" << std::endl;
+            }
+            else
+            {
+                std::cout << "\n[系统] 收到未知类型的好友通知: " << msg << std::endl;
             }
             break;
         }
@@ -453,11 +513,11 @@ void ChatClient::handleInput()
                 std::istringstream iss(line);
                 // cmd用来存读到的命令字符串
                 std::string cmd;
-                int to;
+                int toId;
                 // 第一步：iss>>cmd , cmd截取iss里第一个不是空白分隔的字符，截取到遇到空白分隔符为止(分隔符不截走),iss也发生变化（被截取了）
                 // 空白分隔符就是：空格" "、制表符"\t"、换行符"\n"
-                // 第二步：iss>>to , 截取后的iss再截取一次
-                iss >> cmd >> to;
+                // 第二步：iss>>toId , 截取后的iss再截取一次
+                iss >> cmd >> toId;
                 std::string msg;
                 std::getline(iss, msg);
                 if (!msg.empty() && msg[0] == ' ')
@@ -466,7 +526,7 @@ void ChatClient::handleInput()
                 json js;
                 js["msgid"] = ONE_CHAT_MSG;
                 js["from"] = _userId;
-                js["to"] = to;
+                js["to"] = toId;
                 js["message"] = msg;
                 sendJson(js);
                 continue;
@@ -496,6 +556,22 @@ void ChatClient::handleInput()
                 js["msgid"] = ACCEPT_FRIEND_MSG; 
                 js["id"] = _userId;
                 js["requesterid"] = requesterId;
+                js["type"] = "accept";
+                sendJson(js);
+                continue;
+            }
+            if(line.rfind("rejectfriend ", 0) == 0)
+            {
+                std::istringstream iss(line);
+                std::string cmd;
+                int requesterId;
+                iss >> cmd >> requesterId;
+
+                json js;
+                js["msgid"] = ACCEPT_FRIEND_MSG; 
+                js["id"] = _userId;
+                js["requesterid"] = requesterId;
+                js["type"] = "reject";
                 sendJson(js);
                 continue;
             }
